@@ -11,6 +11,7 @@ using namespace std;
 
 //定義平滑運算的次數
 #define NSmooth 1000
+#define ROOT 0
 
 /*********************************************************/
 /*變數宣告：                                             */
@@ -38,8 +39,7 @@ int readBMP( char *fileName);        //read file
 int saveBMP( char *fileName);        //save file
 void swap(RGBTRIPLE *a, RGBTRIPLE *b);
 RGBTRIPLE **alloc_memory( int Y, int X );        //allocate memory
-void Array_2to1(int h, int w, RGBTRIPLE **2darr, RGBTRIPLE *arr);
-void Array_1to2(int h, int w, RGBTRIPLE *1darr, RGBTRIPLE **arr);
+void Array_2to1(int h, int w, RGBTRIPLE **darr, RGBTRIPLE *arr);
 
 int main(int argc,char *argv[])
 {
@@ -68,7 +68,7 @@ int main(int argc,char *argv[])
 	MPI_Comm_rank(comm, &rank);	
 	
 	//讀取檔案
-	if( rank == 0){
+	if( rank == ROOT){
 		if ( readBMP( infileName) )
 			cout << "Read file successfully!!" << endl;
 		else
@@ -84,25 +84,33 @@ int main(int argc,char *argv[])
 	RGBTRIPLE *BMPData_local = new RGBTRIPLE[(bmpInfo.biHeight/p + 2)* bmpInfo.biWidth];		//temp
 
 	RGBTRIPLE *Data_send_1D =  new RGBTRIPLE[bmpInfo.biHeight * bmpInfo.biWidth];	//send_buf
-	2DTo1DArray( bmpInfo.biHeight, bmpInfo.biWidth, &BMPSaveData, &Data_send_1D);
-	
+	Array_2to1( bmpInfo.biHeight, bmpInfo.biWidth, BMPSaveData, Data_send_1D);
+
 	//calculate sendcounts and displs
 	int *sendcounts = new int[p];
 	int *displs = new int[p];
 	int pos = 0;
-	int amount = bmpInfo.biHeight * bmpInfo.biWidth / p;
-	for( int i = 0; i < p; i++){
-		sendcounts[i] = amount;
-		displs[i] = pos;
-		pos += sendcounts[i];
+	int amount = 0;
+	if( rank == 0){
+		amount = bmpInfo.biHeight * bmpInfo.biWidth / p;
+		for( int i = 0; i < p; i++){
+			sendcounts[i] = amount;
+			displs[i] = pos;
+			pos += sendcounts[i];
+		}
 	}
 
+	//Bcast
+	MPI_Bcast(&amount, 1, MPI_INT, ROOT, comm);
+	MPI_Bcast(sendcounts, p, MPI_INT, ROOT, comm);
+	MPI_Bcast(displs, p, MPI_INT, ROOT, comm);
+		
 	//scatterd data
-	int err = 0;
-	err = MPI_Scatterv( Data_send_1D, sendcounts, displs, mpi_rgbtriple, BMPSaveData_local, amount, mpi_rgbtriple, 0, comm);
-	//	cout << rank <<" err=" << err <<endl;	
-	MPI_Barrier(comm);
-	
+	MPI_Scatterv( Data_send_1D, sendcounts, displs, mpi_rgbtriple, BMPSaveData_local, amount, mpi_rgbtriple, ROOT, comm);
+
+	cout << "rank="<< rank <<" "<<(int)Data_send_1D[100*rank].rgbBlue <<endl;
+
+
 	int tp = 0;
 if(tp == 1){
 	//進行多次的平滑運算:
@@ -138,7 +146,7 @@ if(tp == 1){
 	}
 
  	//寫入檔案
-	if(rank == 0 && tp == 1){
+	if(rank == 0){
 		if ( saveBMP( outfileName ) )
 			cout << "Save file successfully!!" << endl;
 		else
@@ -279,23 +287,13 @@ void swap(RGBTRIPLE *a, RGBTRIPLE *b)
 	a = b;
 	b = temp;
 }
-void Array_2to1(int h, int w, RGBTRIPLE **2darr, RGBTRIPLE *arr)
+void Array_2to1(int h, int w, RGBTRIPLE **darr, RGBTRIPLE *arr)
 {
 	for(int i = 0; i < h; i++){
 		for(int j = 0; j < w; j++){
-			arr[i*w + j].rgbBlue = 2darr[i][j].rgbBlue;
-			arr[i*w + j].rgbGreen = 2darr[i][j].rgbGreen;
-			arr[i*w + j].rgbRed = 2darr[i][j].rgbRed;
-		}
-	}
-}
-void Array_1to2(int h, int w, RGBTRIPLE *1darr, RGBTRIPLE **arr)
-{
-	for(int i = 0; i < h; i++){
-		for(int j = 0; j < w; j++){
-			arr[i][j].rgbBlue = 1darr[i*w + j].rgbBlue;
-			arr[i][j].rgbGreen = 1darr[i*w + j].rgbGreen;
-			arr[i][j].rgbRed = 1darr[i*w + j].rgbRed;
+			arr[i*w + j].rgbBlue = darr[i][j].rgbBlue;
+			arr[i*w + j].rgbGreen = darr[i][j].rgbGreen;
+			arr[i*w + j].rgbRed = darr[i][j].rgbRed;
 		}
 	}
 }
