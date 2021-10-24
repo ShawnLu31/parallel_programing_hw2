@@ -24,6 +24,9 @@ BMPINFO bmpInfo;
 RGBTRIPLE **BMPSaveData = NULL;
 RGBTRIPLE **BMPData = NULL;
 
+int p = 0;
+int rank = 0;
+MPI_Comm comm = MPI_COMM_WORLD;
 /*********************************************************/
 /*函數宣告：                                             */
 /*  readBMP    ： 讀取圖檔，並把像素資料儲存在BMPSaveData*/
@@ -35,6 +38,8 @@ int readBMP( char *fileName);        //read file
 int saveBMP( char *fileName);        //save file
 void swap(RGBTRIPLE *a, RGBTRIPLE *b);
 RGBTRIPLE **alloc_memory( int Y, int X );        //allocate memory
+void Array_2to1(int h, int w, RGBTRIPLE **2darr, RGBTRIPLE *arr);
+void Array_1to2(int h, int w, RGBTRIPLE *1darr, RGBTRIPLE **arr);
 
 int main(int argc,char *argv[])
 {
@@ -46,29 +51,61 @@ int main(int argc,char *argv[])
 /*  endwtime     ： 記錄結束時間                         */
 /*********************************************************/
 	char *infileName = "input.bmp";
-    char *outfileName = "output.bmp";
+	char *outfileName = "output2.bmp";
 	double startwtime = 0.0, endwtime = 0.0;
-	int p = 0;
-	int rank = 0;
-	MPI_Comm comm = MPI_COMM_WORLD;
 
 	MPI_Init(&argc,&argv);
 	MPI_Comm_size(comm, &p);
+	
+	//create the new mpi data type
+	MPI_Datatype mpi_rgbtriple;
+	int lengths[3] = {1, 1, 1};
+	MPI_Aint disp[3] = {0, 1, 2};
+	MPI_Datatype types[3] = {MPI_BYTE, MPI_BYTE, MPI_BYTE};
+
+	MPI_Type_create_struct(3, lengths, disp, types, &mpi_rgbtriple);
+	MPI_Type_commit(&mpi_rgbtriple);
 	MPI_Comm_rank(comm, &rank);	
 	
 	//讀取檔案
-        if ( readBMP( infileName) )
-                cout << "Read file successfully!!" << endl;
-        else
-                cout << "Read file fails!!" << endl;
-
-	//動態分配記憶體給暫存空間
-        BMPData = alloc_memory( bmpInfo.biHeight, bmpInfo.biWidth);
+	if( rank == 0){
+		if ( readBMP( infileName) )
+			cout << "Read file successfully!!" << endl;
+		else
+			cout << "Read file fails!!" << endl;
+	}
 
 	//記錄開始時間
+	MPI_Barrier(comm);
 	startwtime = MPI_Wtime();
 
-        //進行多次的平滑運算
+	//動態分配記憶體給暫存空間
+	RGBTRIPLE *BMPSaveData_local = new RGBTRIPLE[(bmpInfo.biHeight/p + 2)* bmpInfo.biWidth];	//local data, recv_buf
+	RGBTRIPLE *BMPData_local = new RGBTRIPLE[(bmpInfo.biHeight/p + 2)* bmpInfo.biWidth];		//temp
+
+	RGBTRIPLE *Data_send_1D =  new RGBTRIPLE[bmpInfo.biHeight * bmpInfo.biWidth];	//send_buf
+	2DTo1DArray( bmpInfo.biHeight, bmpInfo.biWidth, &BMPSaveData, &Data_send_1D);
+	
+	//calculate sendcounts and displs
+	int *sendcounts = new int[p];
+	int *displs = new int[p];
+	int pos = 0;
+	int amount = bmpInfo.biHeight * bmpInfo.biWidth / p;
+	for( int i = 0; i < p; i++){
+		sendcounts[i] = amount;
+		displs[i] = pos;
+		pos += sendcounts[i];
+	}
+
+	//scatterd data
+	int err = 0;
+	err = MPI_Scatterv( Data_send_1D, sendcounts, displs, mpi_rgbtriple, BMPSaveData_local, amount, mpi_rgbtriple, 0, comm);
+	//	cout << rank <<" err=" << err <<endl;	
+	MPI_Barrier(comm);
+	
+	int tp = 0;
+if(tp == 1){
+	//進行多次的平滑運算:
 	for(int count = 0; count < NSmooth ; count ++){
 		//把像素資料與暫存指標做交換
 		swap(BMPSaveData,BMPData);
@@ -90,21 +127,35 @@ int main(int argc,char *argv[])
 				BMPSaveData[i][j].rgbRed =  (double) (BMPData[i][j].rgbRed+BMPData[Top][j].rgbRed+BMPData[Top][Left].rgbRed+BMPData[Top][Right].rgbRed+BMPData[Down][j].rgbRed+BMPData[Down][Left].rgbRed+BMPData[Down][Right].rgbRed+BMPData[i][Left].rgbRed+BMPData[i][Right].rgbRed)/9+0.5;
 			}
 	}
-
- 	//寫入檔案
-        if ( saveBMP( outfileName ) )
-                cout << "Save file successfully!!" << endl;
-        else
-                cout << "Save file fails!!" << endl;
+}
+	
 
 	//得到結束時間，並印出執行時間
-    endwtime = MPI_Wtime();
-    cout << "The execution time = "<< endwtime-startwtime <<endl ;
+	MPI_Barrier(comm);
+	endwtime = MPI_Wtime();
+	if( rank == 0){ 
+		cout << "The execution time = "<< endwtime-startwtime <<endl ;
+	}
+
+ 	//寫入檔案
+	if(rank == 0 && tp == 1){
+		if ( saveBMP( outfileName ) )
+			cout << "Save file successfully!!" << endl;
+		else
+			cout << "Save file fails!!" << endl;
+	}
 
 	free(BMPData[0]);
  	free(BMPSaveData[0]);
  	free(BMPData);
  	free(BMPSaveData);
+	//free(BMPData_local[0]);
+ 	//free(BMPSaveData_local[0]);
+	//free(BMPData_local);
+ 	//free(BMPSaveData_local);
+	delete sendcounts;
+	delete displs;
+	MPI_Type_free(&mpi_rgbtriple);
  	MPI_Finalize();
 
     return 0;
@@ -227,4 +278,24 @@ void swap(RGBTRIPLE *a, RGBTRIPLE *b)
 	temp = a;
 	a = b;
 	b = temp;
+}
+void Array_2to1(int h, int w, RGBTRIPLE **2darr, RGBTRIPLE *arr)
+{
+	for(int i = 0; i < h; i++){
+		for(int j = 0; j < w; j++){
+			arr[i*w + j].rgbBlue = 2darr[i][j].rgbBlue;
+			arr[i*w + j].rgbGreen = 2darr[i][j].rgbGreen;
+			arr[i*w + j].rgbRed = 2darr[i][j].rgbRed;
+		}
+	}
+}
+void Array_1to2(int h, int w, RGBTRIPLE *1darr, RGBTRIPLE **arr)
+{
+	for(int i = 0; i < h; i++){
+		for(int j = 0; j < w; j++){
+			arr[i][j].rgbBlue = 1darr[i*w + j].rgbBlue;
+			arr[i][j].rgbGreen = 1darr[i*w + j].rgbGreen;
+			arr[i][j].rgbRed = 1darr[i*w + j].rgbRed;
+		}
+	}
 }
