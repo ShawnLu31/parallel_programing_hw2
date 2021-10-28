@@ -183,10 +183,9 @@ int main(int argc,char *argv[])
  	free(BMPSaveData[0]);
  	free(BMPData);
  	free(BMPSaveData);
-	//free(BMPData_local[0]);
- 	//free(BMPSaveData_local[0]);
-	//free(BMPData_local);
- 	//free(BMPSaveData_local);
+	delete Data_1D;
+	delete BMPData_local;
+ 	delete BMPSaveData_local;
 	delete sendcounts;
 	delete displs;
 	MPI_Type_free(&mpi_rgbtriple);
