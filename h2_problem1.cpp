@@ -39,7 +39,8 @@ int readBMP( char *fileName);        //read file
 int saveBMP( char *fileName);        //save file
 void swap(RGBTRIPLE *a, RGBTRIPLE *b);
 RGBTRIPLE **alloc_memory( int Y, int X );        //allocate memory
-void Array_2to1(int h, int w, RGBTRIPLE **darr, RGBTRIPLE *arr);
+void Array_2to1(int h, int w, RGBTRIPLE **arr2, RGBTRIPLE *arr1);
+void Array_1to2(int h, int w, RGBTRIPLE *arr1, RGBTRIPLE **arr2);
 
 int main(int argc,char *argv[])
 {
@@ -53,7 +54,7 @@ int main(int argc,char *argv[])
 	char *infileName = "input.bmp";
 	char *outfileName = "output2.bmp";
 	double startwtime = 0.0, endwtime = 0.0;
-
+	
 	MPI_Init(&argc,&argv);
 	MPI_Comm_size(comm, &p);
 	
@@ -75,24 +76,26 @@ int main(int argc,char *argv[])
 			cout << "Read file fails!!" << endl;
 	}
 
+	int h = bmpInfo.biHeight;
+	int w = bmpInfo.biWidth;
 	//記錄開始時間
 	MPI_Barrier(comm);
 	startwtime = MPI_Wtime();
 
 	//動態分配記憶體給暫存空間
-	RGBTRIPLE *BMPSaveData_local = new RGBTRIPLE[(bmpInfo.biHeight/p + 2)* bmpInfo.biWidth];	//local data, recv_buf
-	RGBTRIPLE *BMPData_local = new RGBTRIPLE[(bmpInfo.biHeight/p + 2)* bmpInfo.biWidth];		//temp
+	RGBTRIPLE *BMPSaveData_local = new RGBTRIPLE[(h/p + 2) * w];	//local data, recv_buf
+	RGBTRIPLE *BMPData_local = new RGBTRIPLE[(h/p + 2) * w];		//temp
 
-	RGBTRIPLE *Data_send_1D =  new RGBTRIPLE[bmpInfo.biHeight * bmpInfo.biWidth];	//send_buf
-	Array_2to1( bmpInfo.biHeight, bmpInfo.biWidth, BMPSaveData, Data_send_1D);
-
+	RGBTRIPLE *Data_1D =  new RGBTRIPLE[h * w];	//send_buf & recv_buf
+	Array_2to1( h, w, BMPSaveData, Data_1D);
+	
 	//calculate sendcounts and displs
 	int *sendcounts = new int[p];
 	int *displs = new int[p];
 	int pos = 0;
 	int amount = 0;
-	if( rank == 0){
-		amount = bmpInfo.biHeight * bmpInfo.biWidth / p;
+	if( rank == ROOT){
+		amount = h * w / p;
 		for( int i = 0; i < p; i++){
 			sendcounts[i] = amount;
 			displs[i] = pos;
@@ -106,47 +109,70 @@ int main(int argc,char *argv[])
 	MPI_Bcast(displs, p, MPI_INT, ROOT, comm);
 		
 	//scatterd data
-	MPI_Scatterv( Data_send_1D, sendcounts, displs, mpi_rgbtriple, BMPSaveData_local, amount, mpi_rgbtriple, ROOT, comm);
+	MPI_Scatterv( Data_1D, sendcounts, displs, mpi_rgbtriple, BMPSaveData_local, amount, mpi_rgbtriple, ROOT, comm);
+	
+	//put BMPSaveData_local in middle
+	for(int i = h/p + 1; i > 0; i--){
+		for(int j = 0; j < w; j++){
+			BMPSaveData_local[i*w + j].rgbBlue = BMPSaveData_local[(i-1)*w + j].rgbBlue;
+			BMPSaveData_local[i*w + j].rgbGreen = BMPSaveData_local[(i-1)*w + j].rgbGreen;
+			BMPSaveData_local[i*w + j].rgbRed = BMPSaveData_local[(i-1)*w + j].rgbRed;
+		}
+	}
 
-	cout << "rank="<< rank <<" "<<(int)Data_send_1D[100*rank].rgbBlue <<endl;
-
-
-	int tp = 0;
-if(tp == 1){
 	//進行多次的平滑運算:
 	for(int count = 0; count < NSmooth ; count ++){
 		//把像素資料與暫存指標做交換
-		swap(BMPSaveData,BMPData);
+		//swap
+		for(int i = 1; i < h/p + 1; i++){
+			for(int j = 0; j < w; j++){
+				BMPData_local[i*w + j].rgbBlue = BMPSaveData_local[i*w + j].rgbBlue;
+				BMPData_local[i*w + j].rgbGreen = BMPSaveData_local[i*w + j].rgbGreen;
+				BMPData_local[i*w + j].rgbRed = BMPSaveData_local[i*w + j].rgbRed;
+			}
+		}
+		
+		//communication with each processores
+		//rank Top send to rank-1 tempBtn
+		MPI_Send(BMPData_local, w, mpi_rgbtriple, (rank-1)<0? p-1:rank-1, 0, comm);
+		//rank Btn send to rank+1 tempTop
+		MPI_Send(&(BMPData_local[h/p]), w, mpi_rgbtriple, (rank+1)<p? rank+1:0, 1, comm);
+		//rank tempTop recv from rank-1 btn
+		MPI_Recv(&(BMPData_local), w, mpi_rgbtriple, (rank-1)<0? p-1:rank-1, 1, comm, MPI_STATUS_IGNORE);
+		//rank tempBtn recv from rank+1 Top
+		MPI_Recv(&(BMPData_local[h/p]), w, mpi_rgbtriple, (rank+1)<p? rank+1:0, 0, comm, MPI_STATUS_IGNORE);
+
 		//進行平滑運算
-		for(int i = 0; i<bmpInfo.biHeight ; i++)
-			for(int j =0; j<bmpInfo.biWidth ; j++){
+		for(int i = 1; i < h/p + 1 ; i++)
+			for(int j = 0; j < w ; j++){
 				/*********************************************************/
 				/*設定上下左右像素的位置                                 */
 				/*********************************************************/
-				int Top = i>0 ? i-1 : bmpInfo.biHeight-1;
-				int Down = i<bmpInfo.biHeight-1 ? i+1 : 0;
-				int Left = j>0 ? j-1 : bmpInfo.biWidth-1;
-				int Right = j<bmpInfo.biWidth-1 ? j+1 : 0;
+				int Top = i>0 ? i-1 : h-1;
+				int Down = i<h/p + 1 ? i+1 : 0;
+				int Left = j>0 ? j-1 : w-1;
+				int Right = j<w-1 ? j+1 : 0;
 				/*********************************************************/
 				/*與上下左右像素做平均，並四捨五入                       */
 				/*********************************************************/
-				BMPSaveData[i][j].rgbBlue =  (double) (BMPData[i][j].rgbBlue+BMPData[Top][j].rgbBlue+BMPData[Top][Left].rgbBlue+BMPData[Top][Right].rgbBlue+BMPData[Down][j].rgbBlue+BMPData[Down][Left].rgbBlue+BMPData[Down][Right].rgbBlue+BMPData[i][Left].rgbBlue+BMPData[i][Right].rgbBlue)/9+0.5;
-				BMPSaveData[i][j].rgbGreen =  (double) (BMPData[i][j].rgbGreen+BMPData[Top][j].rgbGreen+BMPData[Top][Left].rgbGreen+BMPData[Top][Right].rgbGreen+BMPData[Down][j].rgbGreen+BMPData[Down][Left].rgbGreen+BMPData[Down][Right].rgbGreen+BMPData[i][Left].rgbGreen+BMPData[i][Right].rgbGreen)/9+0.5;
-				BMPSaveData[i][j].rgbRed =  (double) (BMPData[i][j].rgbRed+BMPData[Top][j].rgbRed+BMPData[Top][Left].rgbRed+BMPData[Top][Right].rgbRed+BMPData[Down][j].rgbRed+BMPData[Down][Left].rgbRed+BMPData[Down][Right].rgbRed+BMPData[i][Left].rgbRed+BMPData[i][Right].rgbRed)/9+0.5;
+				BMPSaveData_local[i*w + j].rgbBlue =  (double) (BMPData_local[i*w + j].rgbBlue+BMPData_local[Top*w + j].rgbBlue+BMPData_local[Top*w + Left].rgbBlue+BMPData_local[Top*w + Right].rgbBlue+BMPData_local[Down*w + j].rgbBlue+BMPData_local[Down*w + Left].rgbBlue+BMPData_local[Down*w + Right].rgbBlue+BMPData_local[i*w + Left].rgbBlue+BMPData_local[i*w + Right].rgbBlue)/9+0.5;
+				BMPSaveData_local[i*w + j].rgbGreen =  (double) (BMPData_local[i*w + j].rgbGreen+BMPData_local[Top*w + j].rgbGreen+BMPData_local[Top*w + Left].rgbGreen+BMPData_local[Top*w + Right].rgbGreen+BMPData_local[Down*w + j].rgbGreen+BMPData_local[Down*w + Left].rgbGreen+BMPData_local[Down*w + Right].rgbGreen+BMPData_local[i*w + Left].rgbGreen+BMPData_local[i*w + Right].rgbGreen)/9+0.5;
+				BMPSaveData_local[i*w + j].rgbRed =  (double) (BMPData_local[i*w + j].rgbRed+BMPData_local[Top*w + j].rgbRed+BMPData_local[Top*w + Left].rgbRed+BMPData_local[Top*w + Right].rgbRed+BMPData_local[Down*w + j].rgbRed+BMPData_local[Down*w + Left].rgbRed+BMPData_local[Down*w + Right].rgbRed+BMPData_local[i*w + Left].rgbRed+BMPData_local[i*w + Right].rgbRed)/9+0.5;
 			}
 	}
-}
 	
+	//gatherv
+	MPI_Gatherv(Data_1D, amount, mpi_rgbtriple, BMPSaveData, sendcounts, displs, mpi_rgbtriple, ROOT, comm);
 
 	//得到結束時間，並印出執行時間
 	MPI_Barrier(comm);
 	endwtime = MPI_Wtime();
-	if( rank == 0){ 
+	if( rank == ROOT){ 
 		cout << "The execution time = "<< endwtime-startwtime <<endl ;
 	}
 
  	//寫入檔案
-	if(rank == 0){
+	if(rank == ROOT){
 		if ( saveBMP( outfileName ) )
 			cout << "Save file successfully!!" << endl;
 		else
@@ -287,13 +313,23 @@ void swap(RGBTRIPLE *a, RGBTRIPLE *b)
 	a = b;
 	b = temp;
 }
-void Array_2to1(int h, int w, RGBTRIPLE **darr, RGBTRIPLE *arr)
+void Array_2to1(int h, int w, RGBTRIPLE **arr2, RGBTRIPLE *arr1)
 {
 	for(int i = 0; i < h; i++){
 		for(int j = 0; j < w; j++){
-			arr[i*w + j].rgbBlue = darr[i][j].rgbBlue;
-			arr[i*w + j].rgbGreen = darr[i][j].rgbGreen;
-			arr[i*w + j].rgbRed = darr[i][j].rgbRed;
+			arr1[i*w + j].rgbBlue = arr2[i][j].rgbBlue;
+			arr1[i*w + j].rgbGreen = arr2[i][j].rgbGreen;
+			arr1[i*w + j].rgbRed = arr2[i][j].rgbRed;
+		}
+	}
+}
+void Arrat_1to2(int h, int w, RGBTRIPLE *arr1, RGBTRIPLE **arr2)
+{
+	for(int i = 0; i < h; i++){
+		for(int j = 0; j < w; j++){
+			arr2[i][j].rgbBlue = arr1[i*w + j].rgbBlue;
+			arr2[i][j].rgbGreen = arr1[i*w + j].rgbGreen;
+			arr2[i][j].rgbRed = arr1[i*w + j].rgbRed;
 		}
 	}
 }
