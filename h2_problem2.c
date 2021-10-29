@@ -13,6 +13,8 @@ void Quicksort(int *arr, int left, int right);
 int Partition(int *arr, int left, int right);
 void Swap(int *a, int *b);
 int ComputePartner(int phase, int my_rank);
+void Merge_low(int *my_list, int *recv_list, int num_keys);
+void Merge_high(int *my_list, int *recv_list, int num_keys);
 
 
 int main(int argc, char *argv[]){
@@ -56,17 +58,35 @@ int main(int argc, char *argv[]){
 			fflush(stdout);	
 		}
 	}
+	
+	MPI_Barrier(comm);
+	startTime = MPI_Wtime();
 
 	//odd even sort
 	int phase = 0, partner = 0;
+	int *recv_list = malloc(num_keys * sizeof(int));
 	for( phase = 0; phase < comm_sz; phase++){
 		partner = ComputePartner(phase, rank);
-		printf("phase %d) %d <-> %d\n", phase, rank, partner);
-		fflush(stdout);
+		if(partner >= 0 && partner < comm_sz){
+			//send my keys to partner
+			MPI_Send(local_list, num_keys, MPI_INT, partner, phase, comm);
+			//receive keys from partner
+			MPI_Recv(recv_list, num_keys, MPI_INT, partner, phase, comm, MPI_STATUS_IGNORE);
+			//merge local_list and recv_list
+			if(rank < partner){
+				//keep smaller keys
+				Merge_low(local_list, recv_list, num_keys);
+			}
+			else{
+				//keep larger keys
+				Merge_high(local_list, recv_list, num_keys);
+			}
+		}
 	}
-	
+
 	//gather the sorted local list and print the global list
-	//MPI_Gather(local_list, num_keys, MPI_INT, global_list, num_keys, MPI_INT, ROOT, comm);
+	MPI_Gather(local_list, num_keys, MPI_INT, global_list, num_keys, MPI_INT, ROOT, comm);
+	totalTime = MPI_Wtime() - startTime;
 	if( rank == ROOT){
 		printf("After odd-even sort:");
 		fflush(stdout);
@@ -74,6 +94,8 @@ int main(int argc, char *argv[]){
 			printf("%d%c", global_list[i], (i < n-1)? ' ' : '\n');
 			fflush(stdout);	
 		}
+		printf("execution time = %f sec.\n", totalTime);
+		fflush(stdout);
 	}
 
 	free(global_list);
@@ -135,4 +157,48 @@ int ComputePartner(int phase, int my_rank)
 	if(partner == -1 || partner == comm_sz)
 		partner = MPI_PROC_NULL;
 	return partner;
+};
+void Merge_low(int *my_list, int *recv_list, int num_keys)
+{
+	int i = 0;
+	int my_i = 0, recv_i = 0, tp_i = 0;
+	int *tp_list = malloc(num_keys * sizeof(int));
+	//keep the smaller keys from my_list and recv_list
+	while( tp_i < num_keys){
+		if( my_list[my_i] <= recv_list[recv_i]){
+			tp_list[tp_i] = my_list[my_i];
+			tp_i++;
+			my_i++;
+		}
+		else{
+			tp_list[tp_i] = recv_list[recv_i];
+			tp_i++;
+			recv_i++;
+		}
+	}
+	//put tp_list to my_list
+	for( i = 0; i < num_keys; i++)
+		my_list[i] = tp_list[i];
+};
+void Merge_high(int *my_list, int *recv_list, int num_keys)
+{
+	int i = 0;
+	int my_i = num_keys - 1, recv_i = num_keys - 1, tp_i = num_keys - 1;
+	int *tp_list = malloc(num_keys * sizeof(int));
+	//keep the smaller keys from my_list and recv_list
+	while( tp_i >= 0){
+		if( my_list[my_i] >= recv_list[recv_i]){
+			tp_list[tp_i] = my_list[my_i];
+			tp_i--;
+			my_i--;
+		}
+		else{
+			tp_list[tp_i] = recv_list[recv_i];
+			tp_i--;
+			recv_i--;
+		}
+	}
+	//put tp_list to my_list
+	for( i = 0; i < num_keys; i++)
+		my_list[i] = tp_list[i];
 };
